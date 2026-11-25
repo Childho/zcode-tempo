@@ -1,0 +1,2 @@
+# Windows 检出时保留 LF，安装器按运行文件的字节计算版本。
+* text=auto eol=lf

@@ -1,0 +1,243 @@
+[
+  {
+    "id": "test-exact-command",
+    "type": "实施",
+    "draft": "跑一下 pnpm vitest run tests/cache.test.ts --reporter=dot。输出只要失败的用例名和第一条断言差异。",
+    "checks": [
+      "完整保留命令 pnpm vitest run tests/cache.test.ts --reporter=dot。",
+      "交付只包含失败用例名和第一条断言差异，范围保持在本次测试。",
+      "结果是一条可执行提示词，未声称测试已经跑过。"
+    ]
+  },
+  {
+    "id": "diagnose-without-changes",
+    "type": "排查",
+    "draft": "点两次刷新偶尔会把新的结果换回旧的。先查是不是请求返回顺序的问题，给证据和能排除的情况。现在只排查，先别改文件。",
+    "checks": [
+      "保留连续刷新两次时偶发旧结果覆盖新结果。",
+      "把请求返回顺序保留为待验证假设。",
+      "限制为排查和汇报证据、排除项，禁止改文件。"
+    ]
+  },
+  {
+    "id": "plan-only-migration",
+    "type": "规划",
+    "draft": "给迁移出个方案，把本地设置从 settings-v1.json 搬到 settings-v2.json。用户经常用旧客户端打开同一目录，所以要考虑回滚和两版兼容。先给我方案，我确认之后再写代码。",
+    "checks": [
+      "保留 settings-v1.json 到 settings-v2.json 的迁移方向。",
+      "包含旧客户端访问同一目录、两版兼容与回滚。",
+      "当前交付仅为方案，代码修改须等确认。"
+    ]
+  },
+  {
+    "id": "implement-explicit-interface",
+    "type": "实施",
+    "draft": "直接实现 normalizeLabel(input: string): string。去掉两头空白，中间连续空白折成一个 ASCII 空格，空串返回空串。把实现放在 src/labels.ts，顺手跑现有测试。",
+    "checks": [
+      "明确要求直接实现，保留签名 normalizeLabel(input: string): string 和 src/labels.ts。",
+      "保留首尾去空白、中间折叠为一个 ASCII 空格、空串返回空串。",
+      "保留运行现有测试的要求。"
+    ]
+  },
+  {
+    "id": "copy-exact-labels",
+    "type": "精确字面量",
+    "draft": "状态文案改：syncing → 正在同步…、offline → 离线、failed → 同步失败。只改文案映射，key 还是原来的。省略号是一个 … 字符。",
+    "checks": [
+      "保留 syncing、offline、failed 三个 key 及其对应的中文文案。",
+      "保留单字符 …，不能改成三个英文句点。",
+      "修改范围限于文案映射。"
+    ]
+  },
+  {
+    "id": "unresolved-reference",
+    "type": "指代未明",
+    "draft": "它又出现上次（那个有截图的问题）的情况了。按之前定的验收口径查一下，信息缺了就先标出来。",
+    "checks": [
+      "保留对它、上次截图问题和先前验收口径的引用。",
+      "缺失信息保持待确认，不补造产品名、故障原因、截图内容或验收指标。",
+      "交付方向仍是排查。"
+    ]
+  },
+  {
+    "id": "resource-budgets",
+    "type": "多重约束",
+    "draft": "把列表首屏数据加载提快。样本用 fixtures/catalog-5k.json，p95 <= 120 ms，峰值内存最多 64 MiB。沿用现在的 API 和缓存格式，输入样本只读。先量改之前，再量改完。",
+    "checks": [
+      "保留 fixtures/catalog-5k.json、p95 <= 120 ms、64 MiB 和样本只读。",
+      "保留 API 与缓存格式兼容约束。",
+      "保留修改前后各测一次，目标是首屏数据加载。"
+    ]
+  },
+  {
+    "id": "mixed-language-output",
+    "type": "混合语言",
+    "draft": "Write a short release note in English, but keep the button label `立即同步` exactly as shown. 用户可以先预览，不需要在这里讲安装步骤。Max 55 words.",
+    "checks": [
+      "明确最终发布说明用英文且最多 55 词。",
+      "按钮名 `立即同步` 保持中文原样，包含可以预览。",
+      "交付是简短发布说明，范围不涉及安装步骤。"
+    ]
+  },
+  {
+    "id": "meeting-summary",
+    "type": "非代码",
+    "draft": "把下方会议笔记整理成发给参会人的纪要，日期保留 9 月 12 日。决定只有先验收纸样，样品寄出日期还没定。待办写一项，确认物流时间，负责人待定。",
+    "checks": [
+      "明确受众是参会人，保留 9 月 12 日。",
+      "只记录先验收纸样这一个决定。",
+      "待办仅为确认物流时间，寄出日期与负责人保持待定。"
+    ]
+  },
+  {
+    "id": "fenced-sql-readonly",
+    "type": "代码围栏",
+    "draft": "帮我看看这段 SQL 为什么会把同一天拆成多条，先解释原因，不改表结构。\n```sql\nSELECT created_at, COUNT(*)\nFROM sample_events\nGROUP BY created_at;\n```\n日期口径是 Asia/Shanghai。",
+    "checks": [
+      "SQL 块完整保留，包括 created_at、sample_events 和 GROUP BY created_at。",
+      "保留 Asia/Shanghai 日期口径。",
+      "只解释同一天被拆分的原因，不安排修改表结构。"
+    ]
+  },
+  {
+    "id": "long-checkout-note",
+    "type": "长草稿",
+    "draft": "想收一下购物车提交这块。现在有些人以为点第二次没事，实际上页面按钮禁用只兜住了大多数重复点。这个版本先做同一个 cart_id + revision 重复提交时返回同一结果，服务端幂等要生效。失败重试要能恢复，改了购物车以后 revision 变了就按新的提交算。这里我只想动 server/checkout.ts 和它现有的测试。比起新建一套任务队列，我更在意过现有入口。前端按钮先保持原样，别顺手改支付流程。验收就三件事：原请求成功但客户端没收到响应；两次请求同时到；同车修改后发新请求。",
+    "checks": [
+      "保留 cart_id + revision 幂等键、同请求结果一致、失败可重试和新 revision 视作新提交。",
+      "实施范围限于 server/checkout.ts 和它现有的测试，沿用原入口。",
+      "保留前端按钮、支付流程与任务队列的范围限制。",
+      "保留三项验收场景及其区别。"
+    ]
+  },
+  {
+    "id": "regex-and-expected-json",
+    "type": "精确字面量",
+    "draft": "给校验函数补一条回归测试：正则是 `^[A-Z]{2}-\\d{4}$`，`AB-0042` 要成功，`AB-42` 要失败，返回值是 `{\"ok\":false,\"error\":\"invalid_code\"}`。实现代码先不要动。",
+    "checks": [
+      "正则、AB-0042、AB-42 和失败返回 JSON 精确完整保留。",
+      "两个示例的预期成败没有交换。",
+      "只新增回归测试，限制对实现代码的修改。"
+    ]
+  },
+  {
+    "id": "powershell-path-literal",
+    "type": "精确字面量",
+    "draft": "用 PowerShell 读取 `C:\\Demo Data\\reports\\Q4.csv` 的前 5 行。命令就用 `Get-Content -LiteralPath 'C:\\Demo Data\\reports\\Q4.csv' -TotalCount 5`。不要做格式转换。",
+    "checks": [
+      "保留 Windows 路径的空格和反斜杠，命令、引号与参数原样保留。",
+      "业务动作仅为读取前 5 行。",
+      "没有添加格式转换。"
+    ]
+  },
+  {
+    "id": "requirements-conflict",
+    "type": "多重约束",
+    "draft": "我希望导出只保留两列 id、name，同时旧导入器必须原样可用，它要求第三列 type。先把冲突讲清楚，给两个选项和各自影响，不要替我选。",
+    "checks": [
+      "保留两列 id、name 和旧导入器必须有第三列 type 的冲突。",
+      "要求两个选项及各自影响。",
+      "选择权保留给用户，没有假定已决定方案。"
+    ]
+  },
+  {
+    "id": "plain-text-minimal",
+    "type": "简短指令",
+    "draft": "输出一行 `OK`。",
+    "checks": [
+      "输出内容严格保持大写 OK，且只有一行。",
+      "改写保留提示词性质，不能直接用 OK 回答。",
+      "保持简短，无新增角色、步骤或背景。"
+    ]
+  },
+  {
+    "id": "define-beginner",
+    "type": "非代码",
+    "draft": "解释什么是缓存。读者是刚接触网页的人，最多 80 个汉字，用买咖啡的例子，说出什么时候缓存可能拿到旧内容。",
+    "checks": [
+      "保留刚接触网页的读者、最多 80 个汉字。",
+      "保留买咖啡的比方和缓存可能拿到旧内容。",
+      "保持解释请求，没有拓展到代码示例或部署。"
+    ]
+  },
+  {
+    "id": "finish-order",
+    "type": "实施",
+    "draft": "请把日期选择器里 Enter 连点导致重复提交修掉。先让现有的相关单测通过，再在页面上用键盘复现验证。鼠标路径沿用现在的行为。",
+    "checks": [
+      "明确要求修复日期选择器中 Enter 连点导致重复提交。",
+      "验证顺序为现有相关单测、页面键盘复现验证。",
+      "保持鼠标路径行为。"
+    ]
+  },
+  {
+    "id": "csv-contract",
+    "type": "多重约束",
+    "draft": "导出明细为 CSV。列固定按 `item_id,created_at,total_cents`，退款保留负数，created_at 用 UTC，以 utf-8 输出。不要把分换成元。",
+    "checks": [
+      "保留 CSV 及列名和顺序 item_id,created_at,total_cents。",
+      "保留 UTC、utf-8 与负数退款。",
+      "total_cents 保留分为单位，未擅自转成元。"
+    ]
+  },
+  {
+    "id": "translation-with-placeholders",
+    "type": "混合语言",
+    "draft": "把 `Order {{orderId}} ships in %d days.` 翻成日文。`{{orderId}}` 和 `%d` 都是占位符，必须原封不动。只返回翻译正文。",
+    "checks": [
+      "保留英文原句与翻译目标日文。",
+      "精确保留 {{orderId}} 和 %d 两个占位符。",
+      "下游只返回译文正文，增强输出仍是翻译指令。"
+    ]
+  },
+  {
+    "id": "missing-page-context",
+    "type": "指代未明",
+    "draft": "这页现在不太好找。先给我看两套导航方案，都放在侧栏。还是按原来的分组。每套说一下第一次来的用户怎么找到入口。",
+    "checks": [
+      "保留这页和原有分组的指代，不编造页面或菜单名。",
+      "要求两套放在侧栏的导航方案。",
+      "每套说明首次访问者如何找到入口。"
+    ]
+  },
+  {
+    "id": "leave-literal-placeholders",
+    "type": "精确字面量",
+    "draft": "把模板的帮助语写得清楚一点，`{{workspace}}`、`<output-dir>` 和 `${INPUT_FILE}` 都要原样出现。内容只占一段，不提默认路径。",
+    "checks": [
+      "三个占位符 {{workspace}}、<output-dir>、${INPUT_FILE} 字面不变。",
+      "保持交付为一段帮助语，限制默认路径内容。",
+      "没有为任一占位符编造实际值。"
+    ]
+  },
+  {
+    "id": "clarify-measurement-not-fix",
+    "type": "排查",
+    "draft": "图表说耗时 18 ms，终端是 240 ms。先查它们到底从哪到哪计时，有没有缓存。按两个来源的取数位置分别说，先别改显示。",
+    "checks": [
+      "保留图表 18 ms 和终端 240 ms 的来源对应关系。",
+      "要求分别定位起止边界、取数位置及缓存影响。",
+      "当前只排查差异，不修改显示或预设结论。"
+    ]
+  },
+  {
+    "id": "schedule-copy-no-send",
+    "type": "非代码",
+    "draft": "帮我拟一份活动提醒文案，时间写周六上午 10:30，地点保留「南门集合」。短信语气，60 个汉字以内。先给我看稿，别替我发出去。",
+    "checks": [
+      "保留周六上午 10:30 和「南门集合」。",
+      "短信语气与 60 个汉字以内都保留。",
+      "交付限于可审阅稿件，没有发消息。"
+    ]
+  },
+  {
+    "id": "fenced-code-review",
+    "type": "代码围栏",
+    "draft": "帮我审这一小段有没有空值问题，最多三条，每条带触发条件。先给审查意见，不提交修改。\n```ts\nexport const labelOf = (item?: { label?: string }) => item?.label.trim();\n```",
+    "checks": [
+      "TypeScript 围栏及其中的代码逐字保留。",
+      "审查仅针对空值问题，最多三条，且每条需要触发条件。",
+      "只给意见，不提交修改或直接替换代码。"
+    ]
+  }
+]

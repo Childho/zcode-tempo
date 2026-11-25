@@ -1,0 +1,15 @@
+# 本地规划、运行记录和研究草稿
+/.scratch/
+/tasks/
+
+# 本机配置与生成文件
+.env
+.env.*
+__pycache__/
+*.py[cod]
+*.log
+
+# ZCode 安装包、备份及运行文件
+*.asar
+*.asar.*
+/resources/
