@@ -10,6 +10,15 @@ const { setTimeout: delay } = require("node:timers/promises");
 const root = path.join(os.tmpdir(), "harness-zcode-4-e2e");
 const providerId = "harness-fixture";
 const modelId = "harness-test-model";
+const rateReadContents = "HARNESS_RATE_READ_RESULT";
+const predictionFixtures = [
+  { marker: "HARNESS_PREDICT_ACCEPT", reply: "会话甲的独有最终正文。", suggestion: "继续说明会话甲的下一步。" },
+  { marker: "HARNESS_PREDICT_NONEMPTY", reply: "输入框非空用例的独有最终正文。", suggestion: "不应产生这条非空预测。" },
+  { marker: "HARNESS_PREDICT_SWITCH", reply: "切换前会话甲的独有最终正文。", suggestion: "这条未采用的预测只属于会话甲。" },
+  { marker: "HARNESS_PREDICT_MINIMIZED", reply: "最小化期间完成的独有最终正文。", suggestion: "不应产生这条后台预测。" },
+  { marker: "HARNESS_PREDICT_RESTORED", reply: "恢复前台后完成的独有最终正文。", suggestion: "继续说明恢复前台后的下一步。" },
+  { marker: "HARNESS_INTERRUPT", reply: "中断用例的独有正文。", suggestion: "不应产生这条中断预测。" },
+];
 
 function isolateWindowsRegistration(app) {
   const patch = String.raw`
@@ -104,22 +113,67 @@ function json(res, value, status = 200) {
   res.end(JSON.stringify(value));
 }
 
-async function replyWithStream(res) {
+async function replyWithStream(res, input, minimizedStream, rateReadFile) {
   const id = "chatcmpl-harness-fixture";
   const envelope = { id, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: modelId };
   const write = (event) => res.write(`data: ${JSON.stringify({ ...envelope, ...event })}\n\n`);
+  const messages = input.messages ?? [];
+  const userIndex = messages.findLastIndex((message) => message.role === "user");
+  const prompt = JSON.stringify(messages[userIndex]?.content ?? "");
+  const readTurn = prompt.includes("HARNESS_RATE_READ");
+  const toolResult = readTurn && messages.slice(userIndex + 1).find((message) => message.role === "tool");
+  const shouldRead = readTurn && !toolResult;
+  const prefix = toolResult && JSON.stringify(toolResult.content ?? "").includes(rateReadContents)
+    ? "读取后输出" : "模拟输出";
+  if (shouldRead && !input.tools?.some((tool) => tool.function?.name === "Read")) {
+    throw new Error("隔离客户端未向测速用例公开只读 Read 工具");
+  }
+  const noUsage = prompt.includes("HARNESS_NO_USAGE");
+  const willStop = prompt.includes("HARNESS_INTERRUPT");
+  const pauseWhileMinimized = prompt.includes("HARNESS_PREDICT_MINIMIZED");
+  const chunks = willStop ? 40 : prompt.includes("HARNESS_ONE_CHUNK") ? 1 : 18;
   res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
   res.flushHeaders();
-  await delay(200);
+  await delay(prompt.includes("HARNESS_SLOW_FIRST") ? 2800 : 200);
   write({ choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }] });
-  for (let count = 1; count <= 18 && !res.destroyed; count++) {
+  for (let count = 1; count <= chunks && !res.destroyed; count++) {
     await delay(130);
-    write({ choices: [{ index: 0, delta: { content: `模拟输出第 ${count} 段。` }, finish_reason: null }] });
+    write({ choices: [{ index: 0, delta: { content: `${prefix}第 ${count} 段。` }, finish_reason: null }] });
   }
   if (res.destroyed) return;
-  write({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] });
-  write({ choices: [], usage: { prompt_tokens: 120, completion_tokens: 130, total_tokens: 250 } });
-  res.end("data: [DONE]\n\n");
+  if (prompt.includes("HARNESS_PAUSE")) await delay(3000);
+  if (prompt.includes("HARNESS_SLOW_TAIL")) await delay(1128);
+  if (pauseWhileMinimized) {
+    minimizedStream.phase = "waiting";
+    const disconnected = () => minimizedStream.gate.resolve();
+    res.once("close", disconnected);
+    try {
+      await minimizedStream.gate.promise;
+    } finally {
+      res.off("close", disconnected);
+    }
+  }
+  if (res.destroyed) return;
+  const fixture = predictionFixtures.find(({ marker }) => prompt.includes(marker));
+  if (fixture) write({ choices: [{ index: 0, delta: { content: fixture.reply }, finish_reason: null }] });
+  if (shouldRead) {
+    const toolCall = { index: 0, id: "call_harness_rate_read", type: "function",
+      function: { name: "Read", arguments: JSON.stringify({ file_path: rateReadFile }) } };
+    write({ choices: [{ index: 0, delta: { tool_calls: [toolCall] }, finish_reason: null }] });
+  }
+  write({ choices: [{ index: 0, delta: {}, finish_reason: shouldRead ? "tool_calls" : "stop" }] });
+  if (!noUsage) write({ choices: [], usage: { prompt_tokens: 120, completion_tokens: 130, total_tokens: 250 } });
+  res.end("data: [DONE]\n\n", () => {
+    if (pauseWhileMinimized) minimizedStream.phase = "returned";
+  });
+}
+
+function readPromptField(content, label) {
+  const lines = content.split("\n");
+  const field = lines.findIndex((line) => line === `${label} (JSON string):` || line === `${label} (JSON string, reference only):`);
+  if (field < 0) return null;
+  const value = JSON.parse(lines[field + 1]);
+  return typeof value === "string" ? value : null;
 }
 
 async function capture(debugPort, run) {
@@ -160,11 +214,29 @@ async function main() {
   const roamingData = path.join(home, "AppData", "Roaming");
   const localData = path.join(home, "AppData", "Local");
   for (const directory of [workspace, sessionData, roamingData, localData]) fs.mkdirSync(directory, { recursive: true });
-  const counts = { stream: 0, enhancement: 0, other: 0 };
+  const rateReadFile = path.join(workspace, "harness-rate-read.txt");
+  fs.writeFileSync(rateReadFile, rateReadContents);
+  const counts = { stream: 0, enhancement: 0, prediction: 0, other: 0 };
+  const promptRequests = [];
+  const minimizedStream = { phase: "idle", gate: Promise.withResolvers() };
+  const enhancementGate = Promise.withResolvers();
   let debugPort;
   const server = http.createServer(async (req, res) => {
     try {
       if (req.url === "/fixture/requests") return json(res, counts);
+      if (req.url === "/fixture/prompt-requests") return json(res, promptRequests);
+      if (req.url === "/fixture/release-enhancement" && req.method === "POST") {
+        enhancementGate.resolve();
+        return json(res, { released: true });
+      }
+      if (req.url === "/fixture/minimized-stream") {
+        if (req.method === "POST") {
+          if (minimizedStream.phase !== "waiting") return json(res, { phase: minimizedStream.phase }, 409);
+          minimizedStream.phase = "released";
+          minimizedStream.gate.resolve();
+        }
+        return json(res, { phase: minimizedStream.phase });
+      }
       if (req.url === "/fixture/screenshot") return json(res, { path: await capture(debugPort, run) });
       if (req.url === "/v1/models") return json(res, { object: "list", data: [{ id: modelId, object: "model" }] });
       if (req.url !== "/v1/chat/completions" || req.method !== "POST") return json(res, { data: [] });
@@ -173,22 +245,43 @@ async function main() {
       const input = JSON.parse(Buffer.concat(chunks));
       if (input.stream) {
         counts.stream++;
-        await replyWithStream(res);
+        await replyWithStream(res, input, minimizedStream, rateReadFile);
         return;
       }
       const isEnhancement = input.messages?.some((message) => message.role === "system" &&
         typeof message.content === "string" && message.content.includes("Prompt Engineering Expert"));
-      counts[isEnhancement ? "enhancement" : "other"]++;
-      if (isEnhancement) await delay(1200);
-      const formattedDraft = typeof input.messages?.at(-1)?.content === "string" ? input.messages.at(-1).content : "";
-      const match = formattedDraft.match(/^User draft \(JSON string\):\n([^\n]+)\n/u);
-      const draft = match ? JSON.parse(match[1]) : "";
-      const content = isEnhancement ? `增强结果：${draft.replace("npm test -- --watch=false", "npm test")}` : "ZCode fixture";
+      const isPrediction = input.messages?.some((message) => message.role === "system" &&
+        typeof message.content === "string" && message.content.includes("You predict the user's next draft for a coding assistant."));
+      const kind = isPrediction ? "prediction" : isEnhancement ? "enhancement" : "other";
+      counts[kind]++;
+      let content = "ZCode fixture";
+      let request;
+      if (kind !== "other") {
+        const formatted = input.messages?.findLast((message) => message.role === "user")?.content;
+        if (typeof formatted !== "string") throw new Error("缺少合成草稿测试载荷");
+        const draft = readPromptField(formatted, "User draft");
+        const previousUser = readPromptField(formatted, "Previous user message");
+        const previousReply = readPromptField(formatted, "Previous assistant reply");
+        request = { kind, draft, previousUser, previousReply, returned: false };
+        promptRequests.push(request);
+        if (isPrediction) {
+          const fixture = predictionFixtures.find(({ reply }) => previousReply?.includes(reply));
+          content = fixture?.suggestion || "NO_SUGGESTION";
+        } else {
+          if (draft === null) throw new Error("缺少增强测试草稿");
+          content = draft.includes("HARNESS_RETURN_UNCHANGED")
+            ? draft
+            : `增强结果：${draft.replace("npm test -- --watch=false", "npm test")}`;
+        }
+        if (isEnhancement && draft.includes("HARNESS_HOLD_ENHANCEMENT")) await enhancementGate.promise;
+        else await delay(1200);
+      }
       json(res, {
         id: "chatcmpl-harness-fixture", object: "chat.completion", model: modelId,
         choices: [{ index: 0, finish_reason: "stop", message: { role: "assistant", content } }],
         usage: { prompt_tokens: 60, completion_tokens: 30, total_tokens: 90 },
       });
+      if (request) request.returned = true;
     } catch (error) {
       if (!res.headersSent) json(res, { error: String(error.message) }, 500);
       else res.destroy();

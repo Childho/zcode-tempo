@@ -4,50 +4,72 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { fileURLToPath } = require("node:url");
 const { app, webContents } = require("electron");
-const { requestEnhancement } = require("./enhance-request.cjs");
+const { requestEnhancement, requestPrediction } = require("./enhance-request.cjs");
 
 const signalName = "[harness-zcode:request]";
+const REQUEST_TIMEOUT_MS = 75_000;
 const rendererEntry = path.join(process.resourcesPath, "app.asar", "out", "renderer", "index.html");
 
-function rendererModule(filename) {
+function rendererModule(filename, dependencies = "{}") {
   const code = fs.readFileSync(path.join(__dirname, filename), "utf8");
-  return `(function () { const module = { exports: {} }; ${code}\nreturn module.exports; })()`;
+  return `(function (dependencies) {
+    const module = { exports: {} };
+    const require = (name) => {
+      if (!Object.hasOwn(dependencies, name)) throw new Error("Unknown renderer module " + name);
+      return dependencies[name];
+    };
+    ${code}\nreturn module.exports; })(${dependencies})`;
 }
 
 const program = `(() => {
   if (window.__harnessZCode) return;
   const rate = ${rendererModule("rate.cjs")};
+  const markdownFences = ${rendererModule("markdown-fences.cjs")};
+  const replyContext = ${rendererModule("reply-context.cjs", '{ "./markdown-fences.cjs": markdownFences }')};
   const enhancement = ${rendererModule("enhancement.cjs")};
   const requests = new Map();
-  let queued = null;
+  const queued = [];
   window.__harnessZCode = Object.freeze({
-    takeRequest() {
-      const value = queued;
-      queued = null;
-      return value;
+    takeMessages() {
+      return queued.splice(0);
     },
     deliver(id, result) {
       const settle = requests.get(id);
       if (settle) settle(result);
     },
   });
-  function request(payload) {
+  function enqueue(message) {
+    queued.push(message);
+    console.info(${JSON.stringify(signalName)});
+  }
+  function request(payload, { signal } = {}) {
     return new Promise((resolve) => {
+      if (signal?.aborted) {
+        resolve({ ok: false, kind: "cancelled" });
+        return;
+      }
       const id = crypto.randomUUID();
-      const timeout = setTimeout(() => settle({ ok: false, error: "提示词增强超时，已保留草稿" }), 75000);
+      function cancel(result) {
+        const index = queued.findIndex((message) => message.id === id);
+        if (index >= 0) queued.splice(index, 1);
+        else enqueue({ type: "cancel", id });
+        settle(result);
+      }
+      const onAbort = () => cancel({ ok: false, kind: "cancelled" });
+      const timeout = setTimeout(() => cancel({ ok: false, error: "提示词增强超时，已保留草稿" }), ${REQUEST_TIMEOUT_MS});
       function settle(result) {
         clearTimeout(timeout);
+        signal?.removeEventListener("abort", onAbort);
         requests.delete(id);
-        if (queued?.id === id) queued = null;
         resolve(result);
       }
       requests.set(id, settle);
-      queued = { ...payload, id };
-      console.info(${JSON.stringify(signalName)});
+      signal?.addEventListener("abort", onAbort, { once: true });
+      enqueue({ ...payload, type: "request", id });
     });
   }
-  rate.installRate({ window, document });
-  enhancement.installEnhancement({ window, document, getComposerProps: rate.getComposerProps, request });
+  const composer = enhancement.installEnhancement({ window, document, getComposerProps: rate.getComposerProps, replyContext, request });
+  rate.installRate({ window, document, onComposer: composer?.observeComposer });
 })();`;
 
 function trustedWindow(contents) {
@@ -70,7 +92,10 @@ const wired = new WeakSet();
 function wire(contents) {
   if (wired.has(contents) || contents.getType() !== "window") return;
   wired.add(contents);
-  let controller = null;
+  const activeRequests = new Map();
+  let page = 0;
+  let draining = false;
+  let signalled = false;
 
   const inject = () => {
     if (!trustedWindow(contents)) return;
@@ -79,43 +104,82 @@ function wire(contents) {
     });
   };
 
-  async function handleRequest() {
-    if (!trustedWindow(contents) || controller) return;
+  async function handleRequest(request) {
     const active = new AbortController();
-    controller = active;
+    activeRequests.set(request.id, active);
+    let result;
     try {
-      const request = await contents.executeJavaScript("window.__harnessZCode?.takeRequest() ?? null");
-      if (!request || !/^[0-9a-f-]{36}$/iu.test(request.id)) return;
-      const result = await requestEnhancement({
+      const options = {
         providerId: request.providerId,
         modelId: request.modelId,
-        text: request.text,
         signal: active.signal,
         dataBaseDir: process.env.ZCODE_DATA_BASE_DIR,
-      });
-      if (!active.signal.aborted && trustedWindow(contents)) {
-        // 先清理本请求，避免页面写回后发出的下一次合法手势赶到锁的释放之前。
-        if (controller === active) controller = null;
-        await contents.executeJavaScript(`window.__harnessZCode?.deliver(${serialize(request.id)}, ${serialize(result)})`);
-      }
+      };
+      result = request.mode === "prediction"
+        ? await requestPrediction({ ...options, previousUser: request.previousUser, previousReply: request.previousReply })
+        : await requestEnhancement({ ...options, text: request.text, previousReply: request.previousReply });
+    } catch {
+      result = { ok: false, error: "提示词增强失败，已保留草稿" };
+    }
+    if (activeRequests.get(request.id) !== active) return;
+    activeRequests.delete(request.id);
+    if (!trustedWindow(contents)) return;
+    try {
+      await contents.executeJavaScript(`window.__harnessZCode?.deliver(${serialize(request.id)}, ${serialize(result)})`);
     } catch {
       if (trustedWindow(contents)) console.error("[harness-zcode] prompt enhancement transport failed");
-    } finally {
-      if (controller === active) controller = null;
     }
+  }
+
+  async function drainMessages() {
+    signalled = true;
+    if (draining) return;
+    draining = true;
+    try {
+      // 读取期间收到的新信号留给下一批，不因在途请求而丢失。
+      while (signalled && trustedWindow(contents)) {
+        signalled = false;
+        const pageAtRead = page;
+        let messages;
+        try {
+          messages = await contents.executeJavaScript("window.__harnessZCode?.takeMessages() ?? []");
+        } catch {
+          if (page === pageAtRead && trustedWindow(contents)) console.error("[harness-zcode] prompt enhancement transport failed");
+          continue;
+        }
+        if (page !== pageAtRead || !trustedWindow(contents) || !Array.isArray(messages)) continue;
+        for (const message of messages) {
+          if (typeof message?.id !== "string" || !/^[0-9a-f-]{36}$/iu.test(message.id)) continue;
+          if (message.type === "cancel") {
+            const active = activeRequests.get(message.id);
+            activeRequests.delete(message.id);
+            active?.abort();
+          } else if (message.type === "request" && !activeRequests.has(message.id)) {
+            void handleRequest(message);
+          }
+        }
+      }
+    } finally {
+      draining = false;
+    }
+  }
+
+  function invalidatePage() {
+    page++;
+    signalled = false;
+    for (const active of activeRequests.values()) active.abort();
+    activeRequests.clear();
   }
 
   contents.on("dom-ready", inject);
   contents.on("did-finish-load", inject);
-  contents.on("destroyed", () => controller?.abort());
-  contents.on("did-start-navigation", (_event, _url, sameDocument, mainFrame) => {
-    if (mainFrame && !sameDocument) controller?.abort();
-  });
-  // 只在手势产生请求时唤醒主进程，传输信号本身不包含草稿或凭据。
+  contents.on("destroyed", invalidatePage);
+  contents.on("did-navigate", invalidatePage);
+  // 请求入队时唤醒主进程，传输信号本身不包含会话内容或凭据。
   contents.on("console-message", (_event, details, legacyMessage) => {
     if ((details?.message || legacyMessage) !== signalName) return;
     if (details?.frame && details.frame !== contents.mainFrame) return;
-    void handleRequest();
+    void drainMessages();
   });
   if (!contents.isLoading()) inject();
 }

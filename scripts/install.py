@@ -8,6 +8,7 @@ import re
 import shutil
 import struct
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -18,6 +19,57 @@ MARKER = re.compile(
     rb'\n;import\("file:[^"\n]*/harness-zcode/[a-f0-9]{16}/bootstrap\.cjs"\)'
     rb'\.catch\(\(error\) => console\.error\("\[harness-zcode\] load failed", error\)\);\n'
 )
+BUSY = "另一个进程正在处理此 ZCode 安装目录，请稍后重试"
+
+
+@contextmanager
+def installation_lock(resources):
+    if os.name != "nt":
+        import fcntl
+
+        directory = os.open(resources, os.O_RDONLY)
+        try:
+            try:
+                fcntl.flock(directory, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                raise ValueError(BUSY) from error
+            yield
+        finally:
+            os.close(directory)
+        return
+
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateMutexW.argtypes = (wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR)
+    kernel.CreateMutexW.restype = wintypes.HANDLE
+    kernel.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    kernel.WaitForSingleObject.restype = wintypes.DWORD
+    kernel.ReleaseMutex.argtypes = (wintypes.HANDLE,)
+    kernel.ReleaseMutex.restype = wintypes.BOOL
+    kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel.CloseHandle.restype = wintypes.BOOL
+
+    # 安装包会原子替换。用安装目录作为锁的身份，避免锁随文件替换而失效。
+    identity = hashlib.sha256(os.fsencode(os.path.normcase(resources))).hexdigest()
+    mutex = kernel.CreateMutexW(None, False, f"Global\\zcode-tempo-install-{identity}")
+    if not mutex:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        wait_object, wait_abandoned, wait_timeout = 0, 0x80, 0x102
+        status = kernel.WaitForSingleObject(mutex, 0)
+        if status == wait_timeout:
+            raise ValueError(BUSY)
+        # 前一个进程异常退出时，Windows 将所有权交给这次操作。安装逻辑会重新读取安装包。
+        if status not in (wait_object, wait_abandoned):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            yield
+        finally:
+            kernel.ReleaseMutex(mutex)
+    finally:
+        kernel.CloseHandle(mutex)
 
 
 def read_archive(stream):
@@ -101,7 +153,7 @@ def publish_runtime(resources):
     sources = {item.relative_to(PROJECT / "src"): item.read_bytes()
                for item in (PROJECT / "src").rglob("*.cjs")}
     for required in ("bootstrap.cjs", "rate.cjs", "enhancement.cjs", "enhance-request.cjs",
-                     "enhancement-prompt.cjs", "enhancement-fidelity.cjs"):
+                     "enhancement-prompt.cjs", "enhancement-fidelity.cjs", "reply-context.cjs", "markdown-fences.cjs"):
         if Path(required) not in sources:
             raise ValueError(f"安装文件缺失 {required}")
     license_path = Path("vendor/byte-rax-1.5.23/LICENSE")
@@ -154,6 +206,12 @@ def manage(operation, app_dir, data_base_dir):
     archive = resources / "app.asar"
     if not (app_dir / "ZCode.exe").is_file() or not archive.is_file():
         raise ValueError("请选择包含 ZCode.exe 和 resources/app.asar 的安装目录")
+    with installation_lock(resources):
+        manage_archive(operation, archive, data_base_dir)
+
+
+def manage_archive(operation, archive, data_base_dir):
+    resources = archive.parent
     before = archive.stat()
     staging_path = None
     try:
@@ -210,8 +268,10 @@ def main():
     args = parser.parse_args()
     try:
         manage(args.operation, args.app_dir.resolve(), args.data_base_dir)
-    except (OSError, KeyError, ValueError, struct.error) as error:
+    except PermissionError as error:
         parser.exit(1, f"操作失败。请先完全退出 ZCode。{error}\n")
+    except (OSError, KeyError, ValueError, struct.error) as error:
+        parser.exit(1, f"操作失败。{error}\n")
 
 
 if __name__ == "__main__":

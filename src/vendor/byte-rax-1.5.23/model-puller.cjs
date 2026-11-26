@@ -2217,8 +2217,9 @@ function createModelPuller(opts) {
      * 不进 provider_config 规则——规则查不到（或已禁用）时按同目录 config.json 条目兜底
      * （kind 映射与 fail-closed 门见 v2ProviderCfgOf）；与 resolveEnhanceHost 同门：
      * 禁用规则不再挡在 v2 条目前面（review A-3 对齐两口优先级）。 */
-    const v2Cfg = !direct && !planSrc && (!rule || !modelPullerRuleAllowed(rule)) ? v2ProviderCfgOf(providerId) : null;
-    if (!direct && !planSrc && !rule && !v2Cfg) return { ok: false, kind: "provider", error: "provider not found" };
+    const legacyAllowed = modelPullerRuleAllowed(rule);
+    const v2Cfg = !direct && !planSrc && !legacyAllowed ? v2ProviderCfgOf(providerId) : null;
+    if (!direct && !planSrc && !legacyAllowed && !v2Cfg) return { ok: false, kind: "provider", error: "provider not found or disabled" };
     const cfg = direct ? { access: { type: "api-key", apiKey: direct.apiKey }, api: { type: direct.protocol, baseUrl: direct.baseUrl } } : v2Cfg ? v2Cfg.cfg : effectiveRuleConfig(rule);
     const access = cfg.access || {}, api = cfg.api || {};
     /* issue #440 路径2：zhipu-coding-plan-api-key 是宿主「Coding Plan API-Key」登录的原生
@@ -2283,7 +2284,8 @@ function createModelPuller(opts) {
     }
     if (!baseUrl) return { ok: false, kind: "provider", error: "no base url" };
     if (!apiKey) return { ok: false, kind: "auth", error: planSrc ? "plan token unavailable" : "no api key" };
-    const userContent = enhanceUserContent(text);
+    const userContent = o.userContent ?? enhanceUserContent(text);
+    const maxOutputTokens = o.maxOutputTokens ?? ENHANCE_MAX_TOKENS;
     const buildRequest = (base, key, deviceMid) => {
       const headers = { "Content-Type": "application/json", "User-Agent": "ZCode" };   // fetchModels 同款 UA：网关拒绝无 UA 请求（实测缺 UA 时 anthropic 端点 500 code 1234）
       if (deviceMid) headers["X-Device-Mid"] = deviceMid;   // zcode.z.ai 必带头（缺头 400 code 3001，额度链同款）
@@ -2292,17 +2294,22 @@ function createModelPuller(opts) {
       if (apiType === "openai-chat-completions") {
         req.url = base + "/chat/completions";
         headers["Authorization"] = "Bearer " + key;
-        req.body = { model: mid, messages: [{ role: "system", content: enhancementPrompt }, { role: "user", content: userContent }], max_tokens: ENHANCE_MAX_TOKENS, stream: false };
+        req.body = { model: mid, messages: [{ role: "system", content: enhancementPrompt }, { role: "user", content: userContent }], max_tokens: maxOutputTokens, stream: false };
       } else if (apiType === "openai-responses") {
         req.url = base + "/responses";
         headers["Authorization"] = "Bearer " + key;
-        req.body = { model: mid, input: [{ role: "system", content: enhancementPrompt }, { role: "user", content: userContent }], max_output_tokens: ENHANCE_MAX_TOKENS, stream: false };
+        req.body = { model: mid, input: [{ role: "system", content: enhancementPrompt }, { role: "user", content: userContent }], max_output_tokens: maxOutputTokens, stream: false };
       } else {
         req.url = anthropicBaseWithV1(base) + "/messages";
         headers["x-api-key"] = key;
         headers["anthropic-version"] = "2023-06-01";
         headers["Authorization"] = "Bearer " + key;
-        req.body = { model: mid, max_tokens: ENHANCE_MAX_TOKENS, system: enhancementPrompt, messages: [{ role: "user", content: userContent }], stream: true };
+        req.body = { model: mid, max_tokens: maxOutputTokens, system: enhancementPrompt, messages: [{ role: "user", content: userContent }], stream: true };
+        // 智谱直连实测默认思考可耗尽预测的短预算。只给已验证的套餐接口和模型发送开关。
+        if (o.disableThinking && isBigmodelPlan && req.url === "https://open.bigmodel.cn/api/anthropic/v1/messages" &&
+          /^(?:GLM-5\.3-FlashX?|GLM-5\.4)$/i.test(mid)) {
+          req.body.thinking = { type: "disabled" };
+        }
       }
       return req;
     };
@@ -2388,8 +2395,8 @@ function createModelPuller(opts) {
       }
       return lastFail;
     };
-    let result = await runAttempts(buildRequest(baseUrl, apiKey, zcodeSession ? zcodeSession.deviceMid : directDeviceMid), apiKey, 2, "primary");
-    if (planSrc && isBigmodelPlan && result && !result.ok && (result.kind === "path" || result.status === 401)) {
+    let result = await runAttempts(buildRequest(baseUrl, apiKey, zcodeSession ? zcodeSession.deviceMid : directDeviceMid), apiKey, o.singleAttempt ? 1 : 2, "primary");
+    if (!o.singleAttempt && planSrc && isBigmodelPlan && result && !result.ok && (result.kind === "path" || result.status === 401)) {
       const primaryHost = (() => { try { return new URL(baseUrl).hostname.toLowerCase(); } catch (e) { return ""; } })();
       if (/(^|\.)zcode\.z\.ai$/.test(primaryHost)) {
         /* 双路由降级（2026-11-21 真机实测）：zcode.z.ai 对话端点的 WAF 3012 间歇出现

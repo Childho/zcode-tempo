@@ -1,66 +1,68 @@
 "use strict";
 
-const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/u;
+const { markdownLines } = require("./markdown-fences.cjs");
+
 const INLINE = /(?<![\\`])(`+)(?!`)(.+?)(?<!`)\1(?!`)/gu;
 const COMMAND = /^(?:(?:npm|pnpm|yarn|bun)[ \t]+(?:test|run|ci|install|add|exec|build|lint|check|typecheck)\b|(?:git|docker|cargo|go|node|python3?|pytest|make|dotnet|rg|curl|npx|uv|Get-Content|Test-Path|Set-Location)[ \t]+\S|pytest$)/u;
 const URL = /https?:\/\/[^\s<>"'`，。！？；、]+/giu;
+const URL_WRAPPERS = new Map([[")", "("], ["]", "["], ["}", "{"]]);
 const PATH_SEGMENT = String.raw`[\p{L}\p{N}_.~%+@-]+`;
 const BARE_PATH_START = String.raw`[A-Za-z0-9_.~%+@-]+`;
 const PATH_SEPARATOR = String.raw`[/\\]`;
 const PATH_ROOT = String.raw`(?:[A-Za-z]:[/\\]|\\\\|\.\.?[/\\]|~/|/)`;
-const PATH = new RegExp(
-  String.raw`(?<![\p{L}\p{N}_./\\:-])(?:${PATH_ROOT}(?:${PATH_SEGMENT}${PATH_SEPARATOR})*${PATH_SEGMENT}${PATH_SEPARATOR}?|${BARE_PATH_START}(?:${PATH_SEPARATOR}${PATH_SEGMENT})*${PATH_SEPARATOR}${PATH_SEGMENT}\.[A-Za-z0-9]{1,12})(?![\p{L}\p{N}_/\\-])`,
-  "gu"
-);
+const PATH_PREFIX = String.raw`(?<![\p{L}\p{N}_./\\:-])`;
+const PATH_SUFFIX = String.raw`(?![\p{L}\p{N}_/\\-])`;
+const ROOTED_PATH = `${PATH_PREFIX}${PATH_ROOT}(?:${PATH_SEGMENT}${PATH_SEPARATOR})*${PATH_SEGMENT}${PATH_SEPARATOR}?${PATH_SUFFIX}`;
+// 相对路径必须带扩展名，才允许把紧邻的中文识别为正文。
+const RELATIVE_FILE = String.raw`(?:${PATH_PREFIX}|(?<=\p{Script=Han}))${BARE_PATH_START}(?:${PATH_SEPARATOR}${PATH_SEGMENT})*${PATH_SEPARATOR}${PATH_SEGMENT}\.[A-Za-z0-9]{1,12}(?:${PATH_SUFFIX}|(?=\p{Script=Han}))`;
+const PATH = new RegExp(`${ROOTED_PATH}|${RELATIVE_FILE}`, "gu");
 const QUOTED_PATH = new RegExp(String.raw`^${PATH_ROOT}[\p{L}\p{N}_ .~%+@()&'$/\\-]+$`, "u");
 
 function readParts(text) {
   const fences = [];
   const inline = [];
   const plain = [];
-  let fence = null;
+  let codeLines = null;
 
-  for (const line of text.replace(/\r\n?/g, "\n").split("\n")) {
-    const marker = line.match(FENCE);
-    if (fence) {
-      if (marker && marker[1][0] === fence.marker[0] && marker[1].length >= fence.marker.length && !marker[2].trim()) {
-        fences.push(fence.lines.join("\n"));
-        fence = null;
-      } else {
-        fence.lines.push(line);
-      }
+  for (const line of markdownLines(text)) {
+    if (line.fence === "code") {
+      codeLines.push(line.code);
       continue;
     }
-    if (marker && (marker[1][0] === "~" || !marker[2].includes("`"))) {
-      fence = { marker: marker[1], lines: [] };
-      continue;
-    }
-    plain.push(line.replace(INLINE, (match, _ticks, value) => {
+    if (codeLines) fences.push(codeLines.join("\n"));
+    codeLines = line.fence === "open" ? [] : null;
+    if (line.fence) continue;
+    plain.push(line.text.replace(INLINE, (match, _ticks, value) => {
       // Markdown uses one space on both sides to protect literal backticks at the edges.
       inline.push(/^ .+ $/u.test(value) && value.trim() ? value.slice(1, -1) : value);
       return " ".repeat(match.length);
     }));
   }
-  if (fence) fences.push(fence.lines.join("\n").replace(/\n$/u, ""));
+  if (codeLines) fences.push(codeLines.join("\n"));
   return { fences, inline, plain };
 }
 
 function standaloneCommand(text) {
-  const value = text.trim().replace(/^(?:>\s*)?(?:[-*+]\s+)?(?:\$\s+)?/u, "");
+  const value = text.trim().replace(/^(?:>\s*)?(?:(?:[-*+]|\d{1,9}[.)])\s+)?(?:\$\s+)?/u, "");
   return COMMAND.test(value) ? value : null;
 }
 
-function stripUrlPunctuation(value) {
-  let url = value.replace(/[.,!?;:]+$/u, "");
-  for (const [open, close] of [["(", ")"], ["[", "]"], ["{", "}"]]) {
-    const opens = url.split(open).length;
-    let closes = url.split(close).length;
-    while (url.endsWith(close) && closes > opens) {
-      url = url.slice(0, -1);
-      closes -= 1;
-    }
+function stripUrlPunctuation(value, line, offset) {
+  const beforePunctuation = value.replace(/[.,!?;:]+$/u, "");
+  const unmatched = new Map();
+  for (const [close, open] of URL_WRAPPERS) {
+    unmatched.set(close, beforePunctuation.split(close).length - beforePunctuation.split(open).length);
   }
-  return url;
+  let end = beforePunctuation.length;
+  // 只有找到对应的外层定界符，才能认定其后的标点属于正文。
+  while (offset > 0 && URL_WRAPPERS.get(beforePunctuation[end - 1]) === line[offset - 1]
+    && unmatched.get(beforePunctuation[end - 1]) > 0) {
+    const close = beforePunctuation[--end];
+    unmatched.set(close, unmatched.get(close) - 1);
+    offset -= 1;
+  }
+  if (end === beforePunctuation.length && /[?#]/u.test(value)) return value;
+  return beforePunctuation.slice(0, end);
 }
 
 function collectLine(line, items, wrapped = false) {
@@ -71,8 +73,8 @@ function collectLine(line, items, wrapped = false) {
     if (!wrapped) return;
   }
 
-  const withoutUrls = line.replace(URL, (match) => {
-    items.url.add(stripUrlPunctuation(match));
+  const withoutUrls = line.replace(URL, (match, offset) => {
+    items.url.add(stripUrlPunctuation(match, line, offset));
     return " ".repeat(match.length);
   });
   if (wrapped && QUOTED_PATH.test(withoutUrls)) {
